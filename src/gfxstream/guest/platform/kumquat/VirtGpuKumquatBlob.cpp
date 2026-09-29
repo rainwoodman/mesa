@@ -64,23 +64,22 @@ VirtGpuResourceMappingPtr VirtGpuKumquatResource::createMapping() {
         memcpy(&deviceId, &info.vulkan_info.device_id, sizeof(struct DeviceId));
         std::optional<DeviceId> deviceIdOpt{deviceId};
         auto mapper = GfxStreamVulkanMapper::getInstance(deviceIdOpt);
-        struct VulkanMapperData mapData = {0};
+        if (mapper) {
+            struct VulkanMapperData mapData = {0};
 
-        mapData.handle = resource_export.os_handle;
-        mapData.handleType = resource_export.handle_type;
-        mapData.memoryIdx = info.vulkan_info.memory_idx;
-        mapData.size = mSize;
+            mapData.handle = resource_export.os_handle;
+            mapData.handleType = resource_export.handle_type;
+            mapData.memoryIdx = info.vulkan_info.memory_idx;
+            mapData.size = mSize;
 
-        ret = mapper->map(&mapData);
-        if (ret < 0) {
-            mesa_loge("Mapping failed with %s for resource %u blob %u", strerror(errno),
-                      mResourceHandle, mBlobHandle);
-            return nullptr;
+            ret = mapper->map(&mapData);
+            if (ret >= 0) {
+                return std::make_shared<VirtGpuKumquatResourceMapping>(shared_from_this(), mVirtGpu,
+                                                                       mapData, mSize);
+            }
         }
-
-        return std::make_shared<VirtGpuKumquatResourceMapping>(shared_from_this(), mVirtGpu,
-                                                               mapData, mSize);
-    } else {
+    }
+    {
         ret = virtgpu_kumquat_resource_map(mVirtGpu, &map);
         if (ret < 0) {
             mesa_loge("Mapping failed with %s for resource %u blob %u", strerror(errno),
