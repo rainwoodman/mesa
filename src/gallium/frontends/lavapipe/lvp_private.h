@@ -164,9 +164,9 @@ struct lvp_physical_device {
 
    struct pipe_loader_device *pld;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    const nir_shader_compiler_options *drv_options[LVP_SHADER_STAGES];
    uint32_t max_images;
-   bool snorm_blend;
 
    struct vk_sync_timeline_type sync_timeline_type;
    const struct vk_sync_type *sync_types[3];
@@ -219,6 +219,7 @@ struct lvp_device {
    struct lvp_queue queue[LVP_NUM_QUEUES];
    uint32_t queue_count;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    void *noop_fs;
    simple_mtx_t bda_lock;
    struct hash_table bda;

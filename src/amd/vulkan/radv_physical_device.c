@@ -122,7 +122,7 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
    if (!radv_compute_queue_enabled(pdev))
       return false;
 
-   return pdev->info.gfx_level >= GFX9 && !(instance->queue_disable_flags & RADV_QUEUE_DISABLE_TRANSFER);
+   return pdev->info.gfx_level >= GFX7 && !(instance->queue_disable_flags & RADV_QUEUE_DISABLE_TRANSFER);
 }
 
 static bool
@@ -226,12 +226,9 @@ bool
 radv_host_image_copy_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
-   /* TODO: HIC is supported on GFX10 but the recent addrlib bump introduced few regressions that
-    * should be fixed soon, it's also still missing AVX for some formats. Let's not enable it by
-    * default for now.
-    */
-   return pdev->info.gfx_level >= GFX10_3 ||
-          (pdev->info.gfx_level == GFX10 && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
+   /* TODO: HIC is supported on GFX9 but it's still experimental there. */
+   return pdev->info.gfx_level >= GFX10 ||
+          (pdev->info.gfx_level == GFX9 && (instance->experimental_flags & RADV_EXPERIMENTAL_HIC));
 }
 
 static bool
@@ -944,6 +941,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_ycbcr_2plane_444_formats = true,
       .EXT_ycbcr_image_arrays = true,
       .EXT_zero_initialize_device_memory = true,
+      .AMD_anti_lag = true,
       .AMD_buffer_marker = true,
       .AMD_device_coherent_memory = radv_device_coherent_memory_enabled(pdev),
       .AMD_draw_indirect_count = true,
@@ -1684,6 +1682,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_extended_flags */
       .extendedFlags = true,
+
+      /* VK_AMD_anti_lag */
+      .antiLag = true,
    };
 }
 
@@ -2811,9 +2812,9 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       }
    }
 
-   pdev->use_ngg = (pdev->info.gfx_level >= GFX10 && pdev->info.family != CHIP_NAVI14 &&
-                    !(RADV_DEBUG(instance, NO_NGG))) ||
-                   pdev->info.gfx_level >= GFX11;
+   pdev->use_ngg =
+      (pdev->info.gfx_level >= GFX10 && pdev->info.family != CHIP_NAVI14 && !(RADV_DEBUG(instance, NO_NGG))) ||
+      pdev->info.gfx_level >= GFX11;
 
    /* TODO: Investigate if NGG culling helps on GFX11. */
    pdev->use_ngg_culling = pdev->use_ngg &&
@@ -3641,16 +3642,14 @@ fill_matrix_prop2_ext(struct __vk_outarray *base, struct matrix_prop *prop, void
 
    vk_outarray_append_typed(VkCooperativeMatrixProperties2EXT, out, p)
    {
-      *p = (struct VkCooperativeMatrixProperties2EXT){
-         .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_2_EXT,
-         .MGranularity = 16,
-         .NGranularity = 16,
-         .KGranularity = 16,
-         .AType = prop->a_type,
-         .BType = prop->b_type,
-         .CType = prop->c_type,
-         .ResultType = prop->r_type
-      };
+      *p = (struct VkCooperativeMatrixProperties2EXT){.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_2_EXT,
+                                                      .MGranularity = 16,
+                                                      .NGranularity = 16,
+                                                      .KGranularity = 16,
+                                                      .AType = prop->a_type,
+                                                      .BType = prop->b_type,
+                                                      .CType = prop->c_type,
+                                                      .ResultType = prop->r_type};
    }
 }
 

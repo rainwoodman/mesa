@@ -77,33 +77,11 @@ create_kmod_dev(struct panvk_physical_device *device,
                 const struct panvk_instance *instance, drmDevicePtr drm_device)
 {
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
-   drmVersionPtr version;
-   int fd;
-
-   fd = open(path, O_RDWR | O_CLOEXEC);
+   int fd = open(path, O_RDWR | O_CLOEXEC);
    if (fd < 0) {
       return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "failed to open device %s", path);
+                          "failed to open device '%s'", path);
    }
-
-   version = drmGetVersion(fd);
-   if (!version) {
-      close(fd);
-      return panvk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
-                          "failed to query kernel driver version for device %s",
-                          path);
-   }
-
-   if (strcmp(version->name, "panfrost") && strcmp(version->name, "panthor")) {
-      drmFreeVersion(version);
-      close(fd);
-      return VK_ERROR_INCOMPATIBLE_DRIVER;
-   }
-
-   drmFreeVersion(version);
-
-   if (PANVK_DEBUG(STARTUP))
-      mesa_logi("Found compatible device '%s'.", path);
 
    uint32_t flags = PAN_KMOD_DEV_FLAG_OWNS_FD;
 
@@ -111,12 +89,18 @@ create_kmod_dev(struct panvk_physical_device *device,
       flags |= PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL;
 
    device->kmod.dev = pan_kmod_dev_create(fd, flags, &instance->kmod.allocator);
-
    if (!device->kmod.dev) {
       close(fd);
+
+      if (errno != -ENOMEM)
+         return VK_ERROR_INCOMPATIBLE_DRIVER;
+
       return panvk_errorf(instance, VK_ERROR_OUT_OF_HOST_MEMORY,
                           "cannot create device");
    }
+
+   if (PANVK_DEBUG(STARTUP))
+      mesa_logi("Found compatible device '%s'.", path);
 
    return VK_SUCCESS;
 }
@@ -328,7 +312,8 @@ get_device_sync_types(struct panvk_physical_device *device,
    const unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
    uint32_t sync_type_count = 0;
 
-   device->drm_syncobj_type = vk_drm_syncobj_get_type(device->kmod.dev->fd);
+   device->drm_syncobj_type = vk_drm_syncobj_get_type_from_provider(device->kmod.dev->sync_ops);
+
    if (!device->drm_syncobj_type.features) {
       return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
                        "failed to query syncobj features");
@@ -389,8 +374,12 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    if (result != VK_SUCCESS)
       return result;
 
+   unsigned core_count =
+      pan_query_core_count(&device->kmod.dev->props);
    device->model = pan_get_model(device->kmod.dev->props.gpu_id,
-                                 device->kmod.dev->props.gpu_variant);
+                                 device->kmod.dev->props.gpu_variant,
+                                 core_count,
+                                 device->kmod.dev->props.gpu_features);
 
    unsigned arch = pan_arch(device->kmod.dev->props.gpu_id);
 
@@ -434,11 +423,7 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    device->formats.all = pan_format_table(arch);
    device->formats.blendable = pan_blendable_format_table(arch);
 
-   unsigned core_count =
-      pan_query_core_count(&device->kmod.dev->props);
-
-   memset(device->name, 0, sizeof(device->name));
-   sprintf(device->name, "%s MC%u", device->model->name, core_count);
+   pan_model_device_name(device->name, sizeof(device->name), device->model, core_count, "");
 
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
@@ -596,6 +581,12 @@ panvk_GetPhysicalDeviceQueueFamilyProperties2(
             vk_find_struct(p->pNext, QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES_KHR);
          if (prio)
             panvk_fill_global_priority(physical_device, family, prio);
+
+         VkQueueFamilyOptimalImageTransferGranularityPropertiesKHR *gran =
+            vk_find_struct(p->pNext,
+                           QUEUE_FAMILY_OPTIMAL_IMAGE_TRANSFER_GRANULARITY_PROPERTIES_KHR);
+         if (gran)
+            gran->optimalImageTransferGranularity = (VkExtent3D){1, 1, 1};
       }
    }
 }

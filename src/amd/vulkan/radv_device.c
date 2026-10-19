@@ -25,6 +25,7 @@
 #include "tools/radv_sqtt.h"
 #include "util/u_debug.h"
 #include "radv_cs.h"
+#include "radv_device.h"
 #include "radv_entrypoints.h"
 #include "radv_formats.h"
 #include "radv_physical_device.h"
@@ -1053,8 +1054,8 @@ radv_emit_default_sample_locations(const struct radv_physical_device *pdev, stru
     * support 16 samples.
     */
    if (pdev->info.gfx_level >= GFX7 && pdev->info.gfx_level < GFX12) {
-      radeon_set_context_reg(R_02882C_PA_SU_PRIM_FILTER_CNTL,
-                             S_02882C_XMAX_RIGHT_EXCLUSION(1) | S_02882C_YMAX_BOTTOM_EXCLUSION(1));
+      radeon_opt_set_context_reg(R_02882C_PA_SU_PRIM_FILTER_CNTL, AC_TRACKED_PA_SU_PRIM_FILTER_CNTL,
+                                 S_02882C_XMAX_RIGHT_EXCLUSION(1) | S_02882C_YMAX_BOTTOM_EXCLUSION(1));
    }
 
    if (pdev->info.gfx_level >= GFX12) {
@@ -1256,6 +1257,7 @@ radv_device_init_compiler_info(struct radv_device *device)
             .lower_terminate_to_discard = pdev->drirc.debug.lower_terminate_to_discard,
             .no_implicit_varying_subgroup_size = pdev->drirc.debug.no_implicit_varying_subgroup_size,
             .force_nan_preserve_min_max = pdev->drirc.debug.force_nan_preserve_min_max,
+            .force_exact_glsl_fma = pdev->drirc.debug.force_exact_glsl_fma,
             .enable_custom_border_on_compute_queue = pdev->drirc.features.enable_custom_border_on_compute_queue,
             .gfx10_descriptor_alias_robust =
                pdev->drirc.debug.gfx10_descriptor_alias_robust && pdev->info.gfx_level == GFX10,
@@ -1375,6 +1377,7 @@ static void
 radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAllocator)
 {
    radv_device_finish_utrace(device);
+   radv_device_finish_anti_lag(device);
    radv_device_finish_perf_counter(device);
 
    if (device->zero_bo) {
@@ -1592,8 +1595,8 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++)
       total_queue_count += pCreateInfo->pQueueCreateInfos[i].queueCount;
 
-   device->queues = vk_zalloc(&device->vk.alloc, total_queue_count * sizeof(struct radv_queue), 8,
-                              VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   device->queues =
+      vk_zalloc(&device->vk.alloc, total_queue_count * sizeof(struct radv_queue), 8, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!device->queues) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail;
@@ -1663,6 +1666,9 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    /* Keep shader info for GPU hangs debugging. */
    device->keep_shader_info = radv_device_fault_detection_enabled(device) || radv_trap_handler_enabled();
 
+   device->debug_after_draw = RADV_DEBUG(instance, SYNC_SHADERS) || RADV_DEBUG(instance, FULL_SYNC) ||
+                              radv_device_fault_detection_enabled(device);
+
    result = radv_device_init_tools(device);
    if (result != VK_SUCCESS)
       goto fail;
@@ -1718,6 +1724,12 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
 
    if (device->vk.enabled_features.performanceCounterQueryPools) {
       result = radv_device_init_perf_counter(device);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
+   if (device->vk.enabled_features.antiLag) {
+      result = radv_device_init_anti_lag(device);
       if (result != VK_SUCCESS)
          goto fail;
    }
@@ -2245,7 +2257,8 @@ radv_GetDeviceFaultReportsKHR(VkDevice _device, uint64_t timeout, uint32_t *pFau
       };
       strncpy(fault_info.description, "A GPUVM fault has been detected", sizeof(fault_info.description));
 
-      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem) {
+      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem)
+      {
          *elem = fault_info;
          device->fault.fault_addr_reported = true;
       }
@@ -2260,7 +2273,8 @@ radv_GetDeviceFaultReportsKHR(VkDevice _device, uint64_t timeout, uint32_t *pFau
       strncpy(fault_info.description, "A device lost due to OpAbortKHR has been detected",
               sizeof(fault_info.description));
 
-      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem) {
+      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem)
+      {
          *elem = fault_info;
          device->fault.shader_abort_reported = true;
       }
@@ -2271,7 +2285,8 @@ radv_GetDeviceFaultReportsKHR(VkDevice _device, uint64_t timeout, uint32_t *pFau
       };
       strncpy(fault_info.description, "A device lost has been detected", sizeof(fault_info.description));
 
-      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem) {
+      vk_outarray_append_typed(VkDeviceFaultInfoKHR, &out, elem)
+      {
          *elem = fault_info;
          device->fault.device_lost_reported = true;
       }

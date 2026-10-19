@@ -279,18 +279,19 @@ struct radv_vertex_buffer_state {
 struct radv_index_buffer_state {
    uint64_t va;
    uint32_t index_type;
+   uint32_t index_size;
    uint32_t max_index_count;
 };
 
 struct radv_cond_render_state {
-   uint64_t user_va;                 /* User predication VA. */
-   uint64_t emulated_va;             /* Emulated VA if no 32-bit predication support. */
-   uint64_t mec_inv_pred_va;         /* For inverted predication when using MEC. */
-   int8_t type;                      /* -1: disabled, 0: normal, 1: inverted */
-   uint8_t op;                       /* 32-bit or 64-bit predicate value */
+   uint64_t user_va;         /* User predication VA. */
+   uint64_t emulated_va;     /* Emulated VA if no 32-bit predication support. */
+   uint64_t mec_inv_pred_va; /* For inverted predication when using MEC. */
+   int8_t type;              /* -1: disabled, 0: normal, 1: inverted */
+   uint8_t op;               /* 32-bit or 64-bit predicate value */
    bool enabled;
    bool enabled_save;
-   bool mec_inv_pred_emitted;        /* To ensure we don't have to repeat inverting the VA. */
+   bool mec_inv_pred_emitted; /* To ensure we don't have to repeat inverting the VA. */
    bool suspended;
 };
 
@@ -342,6 +343,7 @@ struct radv_cmd_state {
 
    /* Whether CP DMA is busy/idle. */
    bool dma_is_busy;
+   bool cp_dma_realignment_is_busy;
 
    /* Whether any images that are not L2 coherent are dirty from the CB. */
    bool rb_noncoherent_dirty;
@@ -386,6 +388,7 @@ struct radv_cmd_state {
    bool uses_out_of_order_rast;
    bool uses_vrs_attachment;
    bool force_vrs_per_vertex;
+   bool ignore_ds_state;
 
    uint64_t shader_query_buf_va; /* GFX12+ */
 
@@ -393,7 +396,6 @@ struct radv_cmd_state {
    bool depth_clip_enable;
 
    uint32_t last_cb_target_mask;
-   uint32_t last_ge_cntl;
    uint32_t last_num_instances;
    uint32_t last_first_instance;
    uint32_t last_vertex_offset;
@@ -480,6 +482,7 @@ struct radv_cmd_buffer {
    struct radv_cmd_stream *cs;
    struct radv_cmd_state state;
    enum radv_queue_family qf;
+   bool is_mec;
 
    uint8_t push_constants[MAX_PUSH_CONSTANTS_SIZE];
    VkShaderStageFlags push_constant_stages;
@@ -628,8 +631,6 @@ radv_get_num_pipeline_stat_queries(struct radv_cmd_buffer *cmd_buffer)
           cmd_buffer->state.active_prims_xfb_queries;
 }
 
-bool radv_cmd_buffer_uses_mec(struct radv_cmd_buffer *cmd_buffer);
-
 bool radv_cmd_buffer_upload_alloc_aligned(struct radv_cmd_buffer *cmd_buffer, unsigned size, unsigned alignment,
                                           unsigned *out_offset, void **ptr);
 
@@ -675,12 +676,12 @@ void radv_update_hiz_metadata(struct radv_cmd_buffer *cmd_buffer, struct radv_im
 unsigned radv_instance_rate_prolog_index(unsigned num_attributes, uint32_t instance_rate_inputs);
 
 enum ac_barrier_flags radv_src_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_stages,
-                                               VkAccessFlags2 src_flags, VkAccessFlags3KHR src3_flags,
-                                               const struct radv_image *image, const VkImageSubresourceRange *range);
+                                            VkAccessFlags2 src_flags, VkAccessFlags3KHR src3_flags,
+                                            const struct radv_image *image, const VkImageSubresourceRange *range);
 
 enum ac_barrier_flags radv_dst_access_flush(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 dst_stages,
-                                               VkAccessFlags2 dst_flags, VkAccessFlags3KHR dst3_flags,
-                                               const struct radv_image *image, const VkImageSubresourceRange *range);
+                                            VkAccessFlags2 dst_flags, VkAccessFlags3KHR dst3_flags,
+                                            const struct radv_image *image, const VkImageSubresourceRange *range);
 
 void radv_precompute_hw_sample_location_state(const struct radv_physical_device *pdev,
                                               struct radv_sample_locations_state *state);
@@ -699,6 +700,11 @@ struct radv_draw_info {
     * Number of vertices.
     */
    uint32_t count;
+
+   /**
+    * Vertex offset.
+    */
+   uint32_t vertex_offset;
 
    /**
     * First instance id.

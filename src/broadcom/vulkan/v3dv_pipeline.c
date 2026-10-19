@@ -218,6 +218,7 @@ v3dv_pipeline_get_nir_options(const struct v3d_device_info *devinfo)
          nir_divergence_multiple_workgroup_per_compute_subgroup,
       .discard_is_demote = true,
       .scalarize_ddx = true,
+      .lower_int64_options = (nir_lower_int64_options)~0,
    };
 
    if (!initialized) {
@@ -262,7 +263,9 @@ static bool
 try_lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin, void *state)
 {
    switch (intrin->intrinsic) {
-   case nir_intrinsic_load_input_attachment_coord: {
+   case nir_intrinsic_load_input_attachment_coord:
+   case nir_intrinsic_load_depth_input_attachment_coord:
+   case nir_intrinsic_load_stencil_input_attachment_coord: {
       b->cursor = nir_before_instr(&intrin->instr);
 
       nir_variable *pos_var =

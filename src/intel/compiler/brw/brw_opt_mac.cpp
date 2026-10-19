@@ -719,6 +719,21 @@ preprocess_block(brw_shader &s, const brw_def_analysis &defs, bblock_t *b,
             continue;
          }
 
+         /* 3-source instructions prior to Gfx12 can only use implicit
+          * accumulator writes. If src_inst cannot write to the accumulator
+          * this instruction wants to read, the transformation is not
+          * possible.
+          */
+         if (src_inst->is_3src(s.compiler) && s.devinfo->ver <= 11) {
+            unsigned implicit_bits =
+               brw_implicit_accumulator_bits(src_inst->exec_size,
+                                             src_inst->group,
+                                             src_inst->dst.type);
+
+            if ((acc_to_write & implicit_bits) != implicit_bits)
+               continue;
+         }
+
          if (!accumulator_access_between(s, src_inst, inst, acc_to_write)) {
             flags[nr] = true;
          }
@@ -1144,7 +1159,7 @@ munge_types(path *curr)
 
 static void
 apply_replacement(brw_shader &s, const brw_def_analysis &defs, bblock_t *b,
-                  unsigned acc_to_write, path *curr)
+                  unsigned acc_to_write, path *curr, bool can_replace_destination)
 {
    brw_inst *inst = curr->inst;
    brw_reg acc;
@@ -1163,7 +1178,7 @@ apply_replacement(brw_shader &s, const brw_def_analysis &defs, bblock_t *b,
       acc.nr += ffs(acc_to_write) - 1;
    }
 
-   if (curr->replace_destination) {
+   if (curr->replace_destination && can_replace_destination) {
       /* For pre-CNL, the Bspec says:
        *
        *    No explicit accumulator access because this is a three-source
@@ -1211,8 +1226,6 @@ apply_replacement(brw_shader &s, const brw_def_analysis &defs, bblock_t *b,
             inst->src[other] = apply_negate(inst->src[other]);
          } else if (source_mods_can_reassociate(inst->src[curr->src], src_inst,
                                                 &abs_count, &negate_count)) {
-            assert(abs_count == 0 || abs_count == src_inst->sources);
-
             for (unsigned i = 0; i < abs_count; i++)
                src_inst->src[i] = apply_abs(src_inst->src[i]);
 
@@ -1223,6 +1236,33 @@ apply_replacement(brw_shader &s, const brw_def_analysis &defs, bblock_t *b,
             inst->src[curr->src].abs = false;
          } else {
             assert(s.devinfo->verx10 > 120);
+         }
+      } else if (curr->src >= 0 &&
+                 s.devinfo->verx10 <= 120 &&
+                 inst->opcode == BRW_OPCODE_CSEL) {
+         unsigned abs_count;
+         unsigned negate_count;
+
+         if (source_mods_can_reassociate(inst->src[curr->src], src_inst,
+                                         &abs_count, &negate_count)) {
+            for (unsigned i = 0; i < abs_count; i++)
+               src_inst->src[i] = apply_abs(src_inst->src[i]);
+
+            for (unsigned i = 0; i < negate_count; i++)
+               src_inst->src[i] = apply_negate(src_inst->src[i]);
+
+            inst->src[curr->src].negate = false;
+            inst->src[curr->src].abs = false;
+         } else {
+            /* Source modifiers on the would-be accumulator source cannot be
+             * moved, so the source cannot be changed to the accumulator. That
+             * means the next instruction cannot replace its destination with
+             * the accumulator.
+             */
+            if (curr->next != nullptr)
+               apply_replacement(s, defs, b, acc_to_write, curr->next, false);
+
+            return;
          }
       }
 
@@ -1261,12 +1301,13 @@ apply_replacement(brw_shader &s, const brw_def_analysis &defs, bblock_t *b,
    }
 
    if (curr->next != nullptr)
-      apply_replacement(s, defs, b, acc_to_write, curr->next);
+      apply_replacement(s, defs, b, acc_to_write, curr->next, true);
 }
 
 bool
 brw_opt_mac(brw_shader &s)
 {
+   bool progress = false;
    /* Number of SIMD8 accumulator slots. */
    unsigned num_accumulators;
 
@@ -1278,58 +1319,62 @@ brw_opt_mac(brw_shader &s)
       num_accumulators = 8;
    }
 
-   unsigned acc_nr = 0;
+   for (unsigned acc_nr = 0; acc_nr < num_accumulators; acc_nr += reg_unit(s.devinfo)) {
+      bool pass_progress = false;
 
-   unsigned acc;
-   if (acc_nr % 4 == 0) {
-      acc = 0xf << acc_nr;
-   } else if (acc_nr % 2 == 0) {
-      acc = 0x3 << acc_nr;
-   } else {
-      acc = 0x1 << acc_nr;
-   }
+      unsigned acc;
+      if (acc_nr % 4 == 0) {
+         acc = 0xf << acc_nr;
+      } else if (acc_nr % 2 == 0) {
+         acc = 0x3 << acc_nr;
+      } else {
+         acc = 0x1 << acc_nr;
+      }
 
-   acc &= (1U << num_accumulators) - 1;
+      acc &= (1U << num_accumulators) - 1;
 
-   const brw_def_analysis &defs = s.def_analysis.require();
-   bool progress = false;
-   bool *flags = NULL;
-   path *all_paths = NULL;
+      const brw_def_analysis &defs = s.def_analysis.require();
+      bool *flags = NULL;
+      path *all_paths = NULL;
 
-   flags = new bool[defs.count()];
-   if (flags == NULL)
-      return false;
+      flags = new bool[defs.count()];
+      if (flags == NULL)
+         return false;
 
-   all_paths = new path[s.cfg->total_instructions];
-   if (all_paths == NULL) {
+      all_paths = new path[s.cfg->total_instructions];
+      if (all_paths == NULL) {
+         delete [] flags;
+         return false;
+      }
+
+      foreach_block(block, s.cfg) {
+         memset(flags, 0, sizeof(*flags) * defs.count());
+         memset(all_paths, 0, sizeof(*all_paths) * s.cfg->total_instructions);
+
+         /* The preprocess pass determines which instructions could be allowed to
+          * write the accumulator.
+          */
+         preprocess_block(s, defs, block, acc, flags);
+
+         /* A second pass to find all the possible
+          */
+         path *best = find_optimal_path(s, defs, block, acc, flags, all_paths);
+         if (best != nullptr) {
+            munge_types(best);
+            apply_replacement(s, defs, block, acc, best, true);
+            pass_progress = true;
+         }
+      }
+
       delete [] flags;
-      return false;
-   }
+      delete [] all_paths;
 
-   foreach_block(block, s.cfg) {
-      memset(flags, 0, sizeof(*flags) * defs.count());
-      memset(all_paths, 0, sizeof(*all_paths) * s.cfg->total_instructions);
-
-      /* The preprocess pass determines which instructions could be allowed to
-       * write the accumulator.
-       */
-      preprocess_block(s, defs, block, acc, flags);
-
-      /* A second pass to find all the possible
-       */
-      path *best = find_optimal_path(s, defs, block, acc, flags, all_paths);
-      if (best != nullptr) {
-         munge_types(best);
-         apply_replacement(s, defs, block, acc, best);
+      if (pass_progress) {
          progress = true;
+         s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
+                               BRW_DEPENDENCY_VARIABLES);
       }
    }
 
-   delete [] flags;
-   delete [] all_paths;
-
-   if (progress)
-      s.invalidate_analysis(BRW_DEPENDENCY_INSTRUCTIONS |
-                            BRW_DEPENDENCY_VARIABLES);
    return progress;
 }

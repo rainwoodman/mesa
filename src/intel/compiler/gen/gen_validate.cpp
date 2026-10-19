@@ -1095,7 +1095,8 @@ private:
          }
       }
 
-      if (gen_inst_has_dst(inst->opcode) && !is_null(inst->dst)) {
+      if (devinfo->ver >= 12 ||
+          (gen_inst_has_dst(inst->opcode) && !is_null(inst->dst))) {
          ERROR_IF(inst->dst.region.hstride == 0,
                   "Destination horizontal stride must not be 0.");
       }
@@ -1943,7 +1944,7 @@ private:
       if (!gen_inst_is_send(inst) || inst->send.desc_is_reg)
          return;
 
-      if (inst->opcode == GEN_OP_SENDG) {
+      if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC) {
          sendg_descriptor_restrictions();
          return;
       }
