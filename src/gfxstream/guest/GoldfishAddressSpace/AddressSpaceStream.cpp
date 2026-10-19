@@ -165,7 +165,7 @@ const unsigned char* AddressSpaceStream::readFully(void* ptr, size_t totalReadSi
             m_read = m_readLeft = actual;
         }
 
-        if (actual == 0) {
+        if (actual <= 0) {
             mesa_logd("%s: end of pipe", __FUNCTION__);
             return NULL;
         }
@@ -184,7 +184,7 @@ const unsigned char* AddressSpaceStream::readFully(void* ptr, size_t totalReadSi
 
         actual = speculativeRead(m_readBuf, kReadSize);
 
-        if (actual == 0) {
+        if (actual <= 0) {
             mesa_logd("%s: Failed reading from pipe: %d", __FUNCTION__, errno);
             return NULL;
         }
@@ -369,6 +369,9 @@ ssize_t AddressSpaceStream::speculativeRead(unsigned char* readBuffer, size_t tr
         if (!readAvail) {
             ring_buffer_yield();
             backoff();
+            if (isInError()) {
+                return -1;
+            }
             continue;
         }
 
@@ -393,7 +396,9 @@ void AddressSpaceStream::notifyAvailable() {
     struct address_space_ping request;
     request.metadata = ASG_NOTIFY_AVAILABLE;
     request.resourceId = m_resourceId;
-    m_ops.ping(m_handle, &request);
+    if (!m_ops.ping(m_handle, &request)) {
+        m_context.ring_config->in_error = 1;
+    }
     ++m_notifs;
 }
 
@@ -425,6 +430,9 @@ void AddressSpaceStream::ensureConsumerFinishing() {
         }
 
         backoff();
+        if (isInError()) {
+            return;
+        }
     }
 }
 
@@ -539,6 +547,7 @@ void AddressSpaceStream::backoff() {
 
     if (m_backoffIters > kBackoffItersThreshold) {
         usleep(m_backoffFactor);
+        notifyAvailable();
         uint32_t itersSoFarAfterThreshold = m_backoffIters - kBackoffItersThreshold;
         if (itersSoFarAfterThreshold > kBackoffFactorDoublingIncrement) {
             m_backoffFactor = m_backoffFactor << 1;
